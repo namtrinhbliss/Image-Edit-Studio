@@ -167,6 +167,7 @@ export const SimpleEditor: React.FC = () => {
     const [isErasing, setIsErasing] = useState(false);
     const [eraserBrushSize, setEraserBrushSize] = useState(20);
     const [eraserHardness, setEraserHardness] = useState(1.0); // 0 to 1
+    const [eraserOpacity, setEraserOpacity] = useState(1.0); // 0 to 1 (New: Opacity control)
     const eraserCanvasRef = useRef<HTMLCanvasElement>(null);
     const eraserLastPos = useRef<{x: number, y: number} | null>(null);
     const [isProcessingRemoveBg, setIsProcessingRemoveBg] = useState(false);
@@ -311,7 +312,7 @@ export const SimpleEditor: React.FC = () => {
         setSelectedId(newShape.id);
     };
 
-    // --- Background Removal (Gemini + Post-process) ---
+    // --- Background Removal ---
     const handleRemoveBackground = async () => {
         const el = elements.find(e => e.id === selectedId) as ImageElement;
         if (!el || el.type !== 'image') return;
@@ -319,10 +320,7 @@ export const SimpleEditor: React.FC = () => {
         setIsProcessingRemoveBg(true);
         try {
             const file = base64ToFile(el.src.split(',')[1], 'temp.png', 'image/png');
-            // 1. Call API to get "isolated" image (might be white background)
             const newBase64 = await extractProductFromImage(file);
-            
-            // 2. Post-process: Convert white pixels to transparent using Canvas
             const tempImg = new Image();
             tempImg.src = `data:image/png;base64,${newBase64}`;
             await new Promise((resolve) => { tempImg.onload = resolve; });
@@ -627,11 +625,16 @@ export const SimpleEditor: React.FC = () => {
                         const crop = imgEl.crop || { top: 0, right: 0, bottom: 0, left: 0 };
                         const shadow = imgEl.shadow;
 
+                        // FIX: Apply shadow to context before clipping
+                        // But standard canvas clip() clips the shadow too if not handled carefully
+                        // Strategy: Draw shadow first, then clip and draw image?
+                        // Actually, drop-shadow filter on canvas context is supported in modern browsers
+                        
                         if (shadow && shadow.opacity > 0) {
-                            ctx.shadowColor = hexToRgba(shadow.color, shadow.opacity);
-                            ctx.shadowBlur = shadow.blur;
-                            ctx.shadowOffsetX = shadow.x;
-                            ctx.shadowOffsetY = shadow.y;
+                            const shadowColor = hexToRgba(shadow.color, shadow.opacity);
+                            ctx.filter = `drop-shadow(${shadow.x}px ${shadow.y}px ${shadow.blur}px ${shadowColor})`;
+                        } else {
+                            ctx.filter = 'none';
                         }
 
                         const cropL = imgEl.width * (crop.left / 100);
@@ -645,9 +648,14 @@ export const SimpleEditor: React.FC = () => {
 
                         ctx.beginPath();
                         ctx.roundRect(drawX, drawY, visibleW, visibleH, radius);
+                        ctx.save(); // Save state before clip
                         ctx.clip();
+                        
                         ctx.drawImage(img, -imgEl.width / 2, -imgEl.height / 2, imgEl.width, imgEl.height);
-                        ctx.shadowColor = 'transparent';
+                        ctx.restore(); // Restore clip
+                        
+                        // Reset filter for border
+                        ctx.filter = 'none';
 
                         if (imgEl.border && imgEl.border.width > 0) {
                             ctx.beginPath();
@@ -666,10 +674,11 @@ export const SimpleEditor: React.FC = () => {
                     const shadow = shapeEl.shadow;
 
                     if (shadow && shadow.opacity > 0) {
-                        ctx.shadowColor = hexToRgba(shadow.color, shadow.opacity);
-                        ctx.shadowBlur = shadow.blur;
-                        ctx.shadowOffsetX = shadow.x;
-                        ctx.shadowOffsetY = shadow.y;
+                        const shadowColor = hexToRgba(shadow.color, shadow.opacity);
+                         ctx.shadowColor = shadowColor;
+                         ctx.shadowBlur = shadow.blur;
+                         ctx.shadowOffsetX = shadow.x;
+                         ctx.shadowOffsetY = shadow.y;
                     }
 
                     ctx.fillStyle = shapeEl.color;
@@ -748,7 +757,6 @@ export const SimpleEditor: React.FC = () => {
         }
     }, [isErasing, selectedElement]);
 
-    // Improved Eraser with Interpolation
     const handleEraserDraw = (e: React.MouseEvent<HTMLCanvasElement>) => {
         if (e.buttons !== 1) return; 
         const canvas = eraserCanvasRef.current;
@@ -768,18 +776,20 @@ export const SimpleEditor: React.FC = () => {
         const drawPoint = (pX: number, pY: number) => {
             ctx.beginPath();
             const radgrad = ctx.createRadialGradient(pX, pY, 0, pX, pY, eraserBrushSize);
-            radgrad.addColorStop(0, `rgba(0,0,0,1)`); 
-            radgrad.addColorStop(eraserHardness, `rgba(0,0,0,1)`); 
+            // Center is full strength of eraser opacity (e.g., 0.5 opacity removes 50% of color)
+            // But 'destination-out' uses alpha to determine how much to remove.
+            // If Opacity is 100%, we want alpha 1. If 50%, we want alpha 0.5.
+            radgrad.addColorStop(0, `rgba(0,0,0,${eraserOpacity})`); 
+            radgrad.addColorStop(eraserHardness, `rgba(0,0,0,${eraserOpacity})`); 
             radgrad.addColorStop(1, `rgba(0,0,0,0)`);
             ctx.fillStyle = radgrad;
             ctx.arc(pX, pY, eraserBrushSize, 0, Math.PI * 2);
             ctx.fill();
         }
 
-        // Linear Interpolation for smooth strokes
         if (eraserLastPos.current) {
             const dist = Math.hypot(x - eraserLastPos.current.x, y - eraserLastPos.current.y);
-            const steps = Math.ceil(dist / (eraserBrushSize * 0.2)); // Draw every 20% of brush size
+            const steps = Math.ceil(dist / (eraserBrushSize * 0.2)); 
             
             for (let i = 0; i < steps; i++) {
                 const t = i / steps;
@@ -812,6 +822,10 @@ export const SimpleEditor: React.FC = () => {
                         <div className="flex items-center gap-2">
                              <span className="text-xs">Độ cứng: {(eraserHardness * 100).toFixed(0)}%</span>
                              <input type="range" min="0.1" max="1" step="0.1" value={eraserHardness} onChange={(e) => setEraserHardness(Number(e.target.value))} className="w-24"/>
+                        </div>
+                         <div className="flex items-center gap-2">
+                             <span className="text-xs">Độ mờ: {(eraserOpacity * 100).toFixed(0)}%</span>
+                             <input type="range" min="0.05" max="1" step="0.05" value={eraserOpacity} onChange={(e) => setEraserOpacity(Number(e.target.value))} className="w-24"/>
                         </div>
                         <div className="h-6 w-px bg-gray-300"></div>
                         <Button onClick={saveEraserResult} className="py-1 px-4 text-sm bg-green-500 hover:bg-green-600 border-none">Lưu lại</Button>
@@ -906,7 +920,6 @@ export const SimpleEditor: React.FC = () => {
                         const border = el.border;
                         const shadow = el.shadow;
                         
-                        // Dynamic Shadow Logic
                         let filterStyle = 'none';
                         let textShadowStyle = 'none';
 
@@ -915,7 +928,7 @@ export const SimpleEditor: React.FC = () => {
                              if (el.type === 'text') {
                                 textShadowStyle = `${shadow.x}px ${shadow.y}px ${shadow.blur}px ${shadowColor}`;
                              } else {
-                                // Important: Drop-shadow follows the shape of the image (transparency)
+                                // Important: Apply drop-shadow here (on the parent wrapper's internal filter div)
                                 filterStyle = `drop-shadow(${shadow.x}px ${shadow.y}px ${shadow.blur}px ${shadowColor})`;
                              }
                         }
@@ -932,17 +945,18 @@ export const SimpleEditor: React.FC = () => {
                             onMouseDown={(e) => handleMouseDown(e, el.id, 'move')}
                             onTouchStart={(e) => handleMouseDown(e, el.id, 'move')}
                         >
-                            {/* Render Content */}
-                            <div className={`relative ${isSelected && !croppingThis ? 'ring-2 ring-amber-500 ring-dashed' : 'hover:ring-1 hover:ring-gray-300'}`}>
+                            {/* Layer 1: Shadow Wrapper (Not Clipped) */}
+                            <div style={{ filter: filterStyle, transition: 'filter 0.1s' }}>
                                 
-                                {/* Inner Content Wrapper - Applies Filter (Shadow) & Clip Path */}
-                                <div style={{ 
-                                    clipPath: clipPath,
-                                    filter: filterStyle, 
-                                    border: (border && border.width > 0) ? `${border.width}px ${border.style} ${border.color}` : 'none',
-                                    borderRadius: `${radius}px`,
-                                    transition: 'filter 0.1s'
-                                }}>
+                                {/* Layer 2: Clipped Content */}
+                                <div className={`relative ${isSelected && !croppingThis ? 'ring-2 ring-amber-500 ring-dashed' : 'hover:ring-1 hover:ring-gray-300'}`}
+                                     style={{ 
+                                        clipPath: clipPath,
+                                        // Apply border here so it gets clipped with the shape
+                                        border: (border && border.width > 0) ? `${border.width}px ${border.style} ${border.color}` : 'none',
+                                        borderRadius: `${radius}px`,
+                                     }}
+                                >
                                     {el.type === 'text' && (() => {
                                         const textEl = el as TextElement;
                                         return (
@@ -1008,25 +1022,50 @@ export const SimpleEditor: React.FC = () => {
                                         );
                                     })()}
                                 </div>
-
-                                {/* Controls */}
-                                {isSelected && !croppingThis && (
-                                    <>
-                                        <div 
-                                            className="absolute -top-10 left-1/2 w-8 h-8 bg-white text-slate-800 rounded-full cursor-grab shadow-lg flex items-center justify-center hover:bg-amber-100 transform -translate-x-1/2"
-                                            onMouseDown={(e) => handleMouseDown(e, el.id, 'rotate')}
-                                            onTouchStart={(e) => handleMouseDown(e, el.id, 'rotate')}
-                                        >
-                                            <RotateIcon className="w-4 h-4" />
-                                        </div>
-                                        <div 
-                                            className="absolute -bottom-4 -right-4 w-6 h-6 bg-amber-500 rounded-full cursor-se-resize shadow-md border-2 border-white hover:scale-110"
-                                            onMouseDown={(e) => handleMouseDown(e, el.id, 'resize')}
-                                            onTouchStart={(e) => handleMouseDown(e, el.id, 'resize')}
-                                        />
-                                    </>
-                                )}
                             </div>
+
+                            {/* Controls: OUTSIDE of clip-path so they are always visible */}
+                            {/* Crop Overlay UI */}
+                            {croppingThis && (
+                                <div className="absolute inset-0 pointer-events-auto">
+                                    <div 
+                                        className="absolute border-2 border-white shadow-[0_0_0_9999px_rgba(0,0,0,0.5)]"
+                                        style={{
+                                            top: `${crop.top}%`,
+                                            bottom: `${crop.bottom}%`,
+                                            left: `${crop.left}%`,
+                                            right: `${crop.right}%`,
+                                        }}
+                                    >
+                                            {/* Handles */}
+                                        {['lt','rt','lb','rb'].map(pos => (
+                                            <div 
+                                                key={pos}
+                                                className={`absolute w-4 h-4 bg-white border border-gray-400 z-50 ${pos==='lt' ? '-top-2 -left-2 cursor-nwse-resize' : pos==='rt' ? '-top-2 -right-2 cursor-nesw-resize' : pos==='lb' ? '-bottom-2 -left-2 cursor-nesw-resize' : '-bottom-2 -right-2 cursor-nwse-resize'}`}
+                                                onMouseDown={(e) => handleMouseDown(e, el.id, 'crop', pos as any)}
+                                                onTouchStart={(e) => handleMouseDown(e, el.id, 'crop', pos as any)}
+                                            />
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+
+                            {isSelected && !croppingThis && (
+                                <>
+                                    <div 
+                                        className="absolute -top-10 left-1/2 w-8 h-8 bg-white text-slate-800 rounded-full cursor-grab shadow-lg flex items-center justify-center hover:bg-amber-100 transform -translate-x-1/2"
+                                        onMouseDown={(e) => handleMouseDown(e, el.id, 'rotate')}
+                                        onTouchStart={(e) => handleMouseDown(e, el.id, 'rotate')}
+                                    >
+                                        <RotateIcon className="w-4 h-4" />
+                                    </div>
+                                    <div 
+                                        className="absolute -bottom-4 -right-4 w-6 h-6 bg-amber-500 rounded-full cursor-se-resize shadow-md border-2 border-white hover:scale-110"
+                                        onMouseDown={(e) => handleMouseDown(e, el.id, 'resize')}
+                                        onTouchStart={(e) => handleMouseDown(e, el.id, 'resize')}
+                                    />
+                                </>
+                            )}
                         </div>
                     )})}
                 </div>
